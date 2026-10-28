@@ -292,7 +292,9 @@ class WlanError(OSError):
 
     def __init__(self, code: int, function: str) -> None:
         format_error = getattr(ctypes, "FormatError", None)
-        super().__init__(code, format_error(code).strip() if format_error else f"error {code}")
+        # FormatError takes a signed C int, so codes like 0x80342002 must wrap.
+        signed = code - (1 << 32) if code >= 1 << 31 else code
+        super().__init__(code, format_error(signed).strip() if format_error else f"error {code}")
         self.code = code
         self.function = function
 
