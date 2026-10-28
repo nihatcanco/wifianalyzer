@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Each update waits a week after its release, so a compromised version has time to be caught.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      hooks:
+        patterns: ["*"]

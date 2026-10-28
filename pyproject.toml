@@ -1,0 +1,139 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wifianalyzer"
+dynamic = ["version"]
+description = "Wi-Fi analyzer for macOS, Windows and Linux: nearby networks, spectrum charts and channel recommendations"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Nihatcan Colpan" }]
+requires-python = ">=3.11"
+keywords = ["wifi", "wi-fi", "wlan", "802.11", "spectrum", "channel", "analyzer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: System :: Networking :: Monitoring",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "PySide6-Essentials>=6.8",
+    "pyobjc-framework-CoreWLAN>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreLocation>=10; sys_platform == 'darwin'",
+]
+
+[project.urls]
+Homepage = "https://github.com/nihatcanco/wifianalyzer"
+Issues = "https://github.com/nihatcanco/wifianalyzer/issues"
+Changelog = "https://github.com/nihatcanco/wifianalyzer/blob/main/CHANGELOG.md"
+
+[project.gui-scripts]
+wifianalyzer = "wifianalyzer.gui:main"
+
+[dependency-groups]
+test = ["pytest>=9", "pytest-cov>=7"]
+lint = ["ruff>=0.17", "mypy>=2"]
+release = ["build>=1.3", "twine>=6"]
+dev = [{ include-group = "test" }, { include-group = "lint" }]
+
+[tool.setuptools.dynamic]
+version = { attr = "wifianalyzer.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"wifianalyzer.macos" = ["launcher.c"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "DTZ",  # timezone-aware datetimes
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "FLY",  # f-strings over joins
+    "FURB", # modern idioms
+    "G",    # logging calls format lazily
+    "I",    # import order
+    "LOG",
+    "N",    # naming
+    "PERF", # performance
+    "PIE",
+    "PL",   # pylint
+    "PT",   # pytest style
+    "PTH",  # pathlib
+    "PYI",  # typing idioms
+    "RET",  # returns
+    "RUF",
+    "SIM",  # simplifications
+    "T20",  # no stray prints
+    "UP",   # newer syntax
+    "W",
+]
+ignore = [
+    "PLC0415", # platform-specific modules are imported only where they're needed
+    "PLR0911", # classifiers read best as one return per case
+    "PLR0913", # painting helpers take the painter, theme and geometry they draw with
+    "PLR0917",
+    "PLR2004", # dBm thresholds and channel numbers are clearer inline than named
+    "PERF203", # try/except in a loop is cheap, and free since Python 3.11
+]
+# Typography in user-facing text: ranges ("36–48"), minus signs and menu paths ("Settings › Location").
+allowed-confusables = ["–", "−", "›", "×"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fakes keep the Objective-C and Qt method names of what they stand in for.
+"tests/**" = ["N802", "PLR0915", "SLF001"]
+# The ctypes structures keep their names from the Windows SDK.
+"src/wifianalyzer/scanner/wlanapi.py" = ["N801"]
+
+[tool.ruff.lint.pep8-naming]
+# Qt's virtual methods keep their C++ names when overridden.
+extend-ignore-names = ["*Event", "eventFilter", "rowCount", "columnCount", "headerData", "sizeHint"]
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.11"
+strict = true
+
+[[tool.mypy.overrides]]
+# PyObjC ships without type information.
+module = ["CoreLocation", "CoreWLAN", "Foundation", "objc"]
+ignore_missing_imports = true
+
+[tool.pytest]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra"]
+strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["wifianalyzer"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]

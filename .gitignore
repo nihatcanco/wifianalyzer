@@ -1,0 +1,38 @@
+# Environments
+.venv/
+venv/
+
+# Python and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tool caches and reports
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Saved scans list nearby network names and BSSIDs, which can reveal where they were taken
+wifi-scan-*.json
+
+# Editors
+.vscode/
+*.code-workspace
+.history/
+.idea/
+*.swp
+*~
+
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+.directory
