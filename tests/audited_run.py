@@ -70,11 +70,27 @@ def main(folder: Path) -> dict[str, object]:
     for band in Band:
         window.select_band(band)
         window.grab()
-    saved = folder / "scan.json"
-    QFileDialog.getSaveFileName = lambda *_: (str(saved), "")
-    window.save_action.trigger()
+    files = []
+    for action, name in (
+        (window.save_action, "scan.json"),
+        (window.csv_action, "networks.csv"),
+        (window.chart_action, "spectrum.png"),
+        (window.chart_action, "spectrum.svg"),
+        (window.snapshot_action, "snapshot.png"),
+    ):
+        QFileDialog.getSaveFileName = lambda *_, path=folder / name: (str(path), "")
+        action.trigger()
+        files.append(folder / name)
+    QFileDialog.getOpenFileName = lambda *_: (str(folder / "scan.json"), "")
+    window.open_action.trigger()
+    opened = window.live_action.isVisible()
     window.close()
-    return {"scanned": window._result is not None, "saved": saved.exists(), "attempts": attempts}
+    return {
+        "scanned": window._result is not None,
+        "saved": all(f.exists() for f in files),
+        "opened": opened,
+        "attempts": attempts,
+    }
 
 
 if __name__ == "__main__":

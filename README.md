@@ -59,7 +59,14 @@ Add `-v` to log what's happening to stderr. On Windows the command has no consol
   available colors are gray.
 - **Channel recommendation**: the quietest channels at your current width, compared with yours.
 - **Scanning** runs in the background every 10 s by default (toolbar), or on demand with Ctrl+R or F5.
-- **File › Save Scan** writes the scan and the recommendations for every band as JSON.
+- **File › Save Scan** writes the scan and the recommendations for every band as JSON. **File › Open Scan** shows a
+  saved scan again, with its spectrum, table and recommendations for every band. Automatic scans pause while it's open;
+  **Back to Live** (or Scan Now) returns to live results.
+- **Exporting**, also in the File menu, writes the scan in other formats:
+  - **Export Networks as CSV**: every network on every band, numbered as in the app, for spreadsheets. Names that a
+    spreadsheet would run as a formula are prefixed with an apostrophe.
+  - **Export Spectrum Chart**: the current band's chart as PNG, or as an SVG drawing that stays sharp at any size.
+  - **Export Window Snapshot**: everything below the toolbar as PNG, as it looks now, including a selected network.
 
 The window remembers its size, layout and scan interval. Light and dark mode follow the system. On a Mac, the shortcuts
 use ⌘ instead of Ctrl.
@@ -110,11 +117,13 @@ their own every few minutes. Running as root also works, but isn't needed on a t
 wifianalyzer doesn't connect to any service, and doesn't make the system do it either. `tests/test_offline.py` checks
 this two ways. It reads the code, and fails if a module imports networking code, opens anything but a netlink socket,
 contains an internet address, can open a web link or asks macOS for a position. Then it runs the app through a scan,
-every band and Save Scan, and fails on any attempt to open a network socket, look up a name or open a web page.
+every band, every save and export, and Open Scan, and fails on any attempt to open a network socket, look up a name
+or open a web page.
 
 - **No links**: nothing in the app opens a web page. There's no About Qt dialog either, because it links to qt.io.
-- **Saved scans** list the networks around you, which shows where they were taken. Save Scan suggests your home
-  folder rather than Documents or Desktop, which iCloud and OneDrive often sync.
+- **Saved scans and exports** list the networks around you, which shows where they were taken. Saving and exporting
+  suggest your home folder rather than Documents or Desktop, which iCloud and OneDrive often sync. There's no copy to
+  the clipboard, because macOS and Windows can sync it to your other devices and the cloud.
 
 - **macOS**: scan results come from CoreWLAN. Building the app bundle uses only local tools: clang, `codesign` with an
   ad-hoc signature and no timestamp server, and `open`. wifianalyzer asks for Location permission but never asks macOS

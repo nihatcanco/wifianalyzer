@@ -8,7 +8,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 First release.
 
 - Desktop app with a connection card, signal history, a spectrum chart per band, a sortable network table and channel
-  recommendations. Saves scans as JSON, remembers its layout and follows the system's light or dark mode.
+  recommendations. Saves scans as JSON and opens them again, exports the networks as CSV, the spectrum chart as PNG or
+  SVG and the window as PNG, remembers its layout and follows the system's light or dark mode.
 - Runs on macOS through CoreWLAN, on Windows through the Native Wifi API and on Linux through nl80211, with the same
   information on each where the system provides it.
 - Explains and requests the permissions macOS and Windows require before they show nearby networks. On macOS this

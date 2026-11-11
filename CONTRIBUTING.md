@@ -41,7 +41,7 @@ src/wifianalyzer/
   channels.py        channel and frequency math: bonding blocks, overlap, DFS
   analysis.py        signal quality, interference scoring and recommendations
   display.py         naming, escaping and chart-scale helpers
-  export.py          scans as JSON
+  export.py          scans as JSON and CSV, and reading saved scans back
   privacy.py         where each system lets users allow access to nearby networks
   scanner/           one backend per operating system, behind open_scanner()
     corewlan.py      macOS
@@ -57,6 +57,7 @@ src/wifianalyzer/
     window.py        main window; wires everything together
     worker.py        runs scanner calls on a background thread
     charts.py        spectrum and signal-history charts
+    snapshot.py      PNG and SVG pictures of the window and the spectrum chart
     table.py         network table model and signal meters
     panels.py        connection card, recommendations, access banner
     entries.py       per-network numbering and colors

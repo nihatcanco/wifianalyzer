@@ -4,7 +4,9 @@ import sys
 import threading
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -12,13 +14,14 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPointF, QSettings, Qt
+from PySide6.QtGui import QImage, QTextDocument
 from PySide6.QtGui import Qt as GuiQt
-from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from factories import make_connection, make_network
 from wifianalyzer import gui
 from wifianalyzer.channels import channel_frequency
+from wifianalyzer.export import to_json
 from wifianalyzer.gui import theme
 from wifianalyzer.gui.charts import SignalHistoryChart, SpectrumChart, tooltip_html
 from wifianalyzer.gui.entries import CURRENT_SLOT, Entry, SlotAssigner
@@ -164,6 +167,9 @@ def test_history_chart_paints_with_gaps(app):
     chart.set_samples([(now - 30, -60), (now - 20, None), (now - 10, -58), (now, -57)])
     assert not chart.grab().isNull()
     assert "Now -57 dBm" in chart.accessibleDescription()
+    chart.show_message("Saved scans don't include the signal history")
+    assert chart.accessibleDescription() == "Saved scans don't include the signal history"
+    assert not chart.grab().isNull()
 
 
 def test_tooltip_escapes_ssid():
@@ -330,6 +336,152 @@ def test_save_scan_writes_json(window, sample_result, tmp_path, monkeypatch):
     data = json.loads(target.read_text(encoding="utf-8"))
     assert len(data["networks"]) == len(sample_result.networks)
     assert {r["band"] for r in data["recommendations"]} == {"2.4", "5", "6"}
+
+
+def save_to(monkeypatch, path, chosen_filter=""):
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_: (str(path), chosen_filter))
+
+
+def open_from(monkeypatch, path):
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_: (str(path), ""))
+
+
+@pytest.fixture
+def saved_scan(sample_result, tmp_path):
+    """A scan saved yesterday, with only 2.4 GHz networks and named ones at that."""
+    networks = [named(n, i) for i, n in enumerate(sample_result.networks) if n.band is Band.GHZ_2_4]
+    result = replace(
+        sample_result, networks=networks, connection=None, timestamp=datetime(2026, 10, 29, 14, 3, tzinfo=UTC)
+    )
+    path = tmp_path / "yesterday.json"
+    path.write_text(to_json(result, []), encoding="utf-8")
+    return path
+
+
+def test_exports_wait_for_a_scan(window):
+    assert not any(action.isEnabled() for action in window.export_actions)
+    assert window.open_action.isEnabled()
+
+
+def test_opening_a_saved_scan_pauses_live_scans_until_back_to_live(window, sample_result, saved_scan, monkeypatch):
+    window.auto_refresh.setChecked(True)
+    window._scan_timer.start()
+    window.apply_result(sample_result)
+    open_from(monkeypatch, saved_scan)
+    window.open_action.trigger()
+
+    assert window.live_action.isVisible()
+    assert not window._scan_timer.isActive()
+    assert window.windowTitle().startswith("yesterday.json")
+    assert window.status.text().startswith("Saved scan from 2026-10-29")
+    assert window.banner.isHidden()
+    assert window.connection_card.name.text() == "Not connected"
+    assert window.band_buttons[Band.GHZ_5].text() == "5 GHz  ·  0"
+
+    # Live scans and readings keep arriving, but the saved scan stays on show.
+    window.apply_result(sample_result)
+    window.apply_connection(sample_result.connection)
+    assert window.status.text().startswith("Saved scan")
+    assert window.connection_card.name.text() == "Not connected"
+    window.auto_refresh.setChecked(False)
+    window.auto_refresh.setChecked(True)
+    assert not window._scan_timer.isActive()
+
+    window.live_action.trigger()
+    assert not window.live_action.isVisible()
+    assert window._result is sample_result
+    assert window._scan_timer.isActive()
+    assert window.windowTitle() == "Wi-Fi Analyzer"
+    assert window.connection_card.name.text() != "Not connected"
+    assert window.band_buttons[Band.GHZ_5].text() == "5 GHz  ·  5"
+
+
+def test_back_to_live_before_any_live_scan_clears_the_window(window, saved_scan, monkeypatch):
+    open_from(monkeypatch, saved_scan)
+    window.open_action.trigger()
+    window._scan_failed(ScanError("Wi-Fi is turned off on wlan0."))
+    assert window.status.text().startswith("Saved scan")  # failures wait until you're back to live
+    window.live_action.trigger()
+    assert window._result is None
+    assert window.table_model.rowCount() == 0
+    assert not window.save_action.isEnabled()
+    window._scan_failed(ScanError("Wi-Fi is turned off on wlan0."))
+    assert window.status.text() == "⚠ Wi-Fi is turned off on wlan0."
+
+
+@pytest.mark.parametrize(("content", "reason"), [("{}", '"networks" is missing'), ("[1, 2", "it isn't valid JSON")])
+def test_files_that_arent_scans_are_explained(window, sample_result, tmp_path, monkeypatch, content, reason):
+    path = tmp_path / "other.json"
+    path.write_text(content, encoding="utf-8")
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text: shown.append(text))
+    open_from(monkeypatch, path)
+    window.apply_result(sample_result)
+    window.open_action.trigger()
+    assert shown == [f"other.json isn't a scan saved by Wi-Fi Analyzer: {reason}."]
+    assert window._result is sample_result
+    assert not window.live_action.isVisible()
+
+
+def test_export_csv_is_utf8_for_excel(window, sample_result, tmp_path, monkeypatch):
+    target = tmp_path / "networks.csv"
+    save_to(monkeypatch, target)
+    window.apply_result(sample_result)
+    window.csv_action.trigger()
+    data = target.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbfTime,Band,#,Network")
+    assert data.count(b"\r\n") == len(sample_result.networks) + 1
+
+
+@pytest.mark.parametrize(
+    ("name", "chosen_filter", "saved_as"),
+    [
+        ("chart.png", "", "chart.png"),
+        ("chart.svg", "", "chart.svg"),
+        ("chart", "SVG drawing (*.svg)", "chart.svg"),
+        ("chart", "PNG image (*.png)", "chart.png"),
+    ],
+)
+def test_export_spectrum_chart(app, window, sample_result, tmp_path, monkeypatch, name, chosen_filter, saved_as):
+    result = replace(sample_result, networks=[*sample_result.networks, make_network(6, -40, ssid="<b>&</b>")])
+    save_to(monkeypatch, tmp_path / name, chosen_filter)
+    window.resize(1000, 800)
+    window.show()
+    window.apply_result(result)
+    window.select_band(Band.GHZ_2_4)
+    app.processEvents()
+    window.chart_action.trigger()
+    data = (tmp_path / saved_as).read_bytes()
+    if saved_as.endswith(".png"):
+        image = QImage.fromData(data)
+        assert image.size() == window.spectrum.size() * window.spectrum.devicePixelRatio()
+    else:
+        svg = ElementTree.fromstring(data)  # names are escaped, so it parses
+        ns = {"svg": "http://www.w3.org/2000/svg"}
+        assert svg.find("svg:title", ns).text.startswith("2.4 GHz spectrum")
+        assert "<b>&</b>" in "".join(svg.itertext())
+
+
+def test_export_window_snapshot(app, window, sample_result, tmp_path, monkeypatch):
+    target = tmp_path / "snapshot.png"
+    save_to(monkeypatch, target)
+    window.resize(1000, 800)
+    window.show()
+    window.apply_result(sample_result)
+    app.processEvents()
+    window.snapshot_action.trigger()
+    image = QImage.fromData(target.read_bytes())
+    assert not image.isNull()
+    assert image.size() == window.page.size() * window.page.devicePixelRatio()
+
+
+def test_export_failure_is_reported(window, sample_result, tmp_path, monkeypatch):
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text: shown.append((title, text)))
+    save_to(monkeypatch, tmp_path / "missing" / "networks.csv")
+    window.apply_result(sample_result)
+    window.csv_action.trigger()
+    assert shown == [("Export Networks", "Couldn't save networks.csv: No such file or directory")]
 
 
 def test_settings_are_remembered(app, sample_result, settings, monkeypatch):

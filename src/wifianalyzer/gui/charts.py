@@ -357,16 +357,24 @@ class SignalHistoryChart(QWidget):
         self.setAccessibleName("Signal strength history")
         self._samples: list[tuple[float, int | None]] = []
         self._crosshair: tuple[float, int] | None = None
+        self._message: str | None = None
 
     def set_samples(self, samples: Sequence[tuple[float, int | None]]) -> None:
         """Samples are (unix time, RSSI), with None while disconnected."""
         self._samples = list(samples)
+        self._message = None
         readings = [v for _, v in self._samples if v is not None]
         if readings:
             self.setAccessibleDescription(
                 f"Now {readings[-1]} dBm. Over the last {self.WINDOW_SECONDS // 60} minutes: "
                 f"lowest {min(readings)}, highest {max(readings)} dBm."
             )
+        self.update()
+
+    def show_message(self, message: str) -> None:
+        """No line, just ``message``, until the next samples."""
+        self._samples, self._crosshair, self._message = [], None, message
+        self.setAccessibleDescription(message)
         self.update()
 
     def _plot_rect(self) -> QRectF:
@@ -400,7 +408,7 @@ class SignalHistoryChart(QWidget):
 
         if not any(v is not None for _, v in self._samples):
             painter.setPen(t.qcolor(t.muted))
-            message = "Not connected" if self._samples else "Waiting for the first reading…"
+            message = self._message or ("Not connected" if self._samples else "Waiting for the first reading…")
             painter.drawText(QRectF(self.rect()), Qt.AlignmentFlag.AlignCenter, message)
             return
 

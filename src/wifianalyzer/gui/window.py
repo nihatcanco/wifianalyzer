@@ -47,11 +47,11 @@ from PySide6.QtWidgets import (
 from .. import APP_NAME, __version__, privacy
 from ..analysis import bands_in, recommend
 from ..display import chart_ceiling, index_networks, printable
-from ..export import to_json
+from ..export import ScanFileError, from_json, to_csv, to_json
 from ..macos import bundle, location
 from ..models import Band, Connection, ScanResult
 from ..scanner import AccessDeniedError, ScanError, Scanner
-from . import theme
+from . import snapshot, theme
 from .charts import SignalHistoryChart, SpectrumChart
 from .entries import Entry, SlotAssigner
 from .panels import AccessBanner, Card, ConnectionCard, RecommendationsCard, label
@@ -94,6 +94,10 @@ class ScrollPage(QScrollArea):
         page.resize(width, max(viewport.height(), needed, minimum.height()))
 
 
+def _file_name(result: ScanResult, kind: str, suffix: str) -> str:
+    return f"wifi-{kind}-{result.timestamp:%Y%m%d-%H%M%S}{suffix}"
+
+
 def _timer(parent: QObject, interval_ms: int, callback: Callable[[], None]) -> QTimer:
     timer = QTimer(parent)
     timer.setInterval(interval_ms)
@@ -120,6 +124,10 @@ class MainWindow(QMainWindow):
         self._settings = settings if settings is not None else QSettings()
 
         self._result: ScanResult | None = None
+        """The scan on show: the latest live one, or a saved one while ``_viewing`` names its file."""
+        self._live: ScanResult | None = None
+        self._connection: Connection | None = None
+        self._viewing: str | None = None
         self._band: Band | None = None
         self._assigners = {band: SlotAssigner() for band in Band}
         self._history: deque[tuple[float, int | None]] = deque(maxlen=SignalHistoryChart.WINDOW_SECONDS)
@@ -175,10 +183,28 @@ class MainWindow(QMainWindow):
         self.auto_refresh.setChecked(True)
         self.auto_refresh.toggled.connect(self._toggle_auto_refresh)
 
+        self.live_action = QAction("Back to Live", self)
+        self.live_action.setToolTip("Leave the saved scan and scan again")
+        self.live_action.setVisible(False)
+        self.live_action.triggered.connect(self.scan_now)
+
+        self.open_action = QAction("Open Scan…", self)
+        self.open_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_action.triggered.connect(self._open_scan)
+
         self.save_action = QAction("Save Scan…", self)
         self.save_action.setShortcut(QKeySequence.StandardKey.Save)
-        self.save_action.setEnabled(False)
         self.save_action.triggered.connect(self._save_scan)
+        self.csv_action = QAction("Export Networks as CSV…", self)
+        self.csv_action.triggered.connect(self._export_csv)
+        self.chart_action = QAction("Export Spectrum Chart…", self)
+        self.chart_action.triggered.connect(self._export_chart)
+        self.snapshot_action = QAction("Export Window Snapshot…", self)
+        self.snapshot_action.triggered.connect(self._export_snapshot)
+        # No copy to the clipboard: macOS and Windows can sync it to other devices and the cloud.
+        self.export_actions = (self.save_action, self.csv_action, self.chart_action, self.snapshot_action)
+        for action in self.export_actions:
+            action.setEnabled(False)
 
         self.quit_action = QAction("Quit", self)
         self.quit_action.setShortcut(QKeySequence("Ctrl+Q"))
@@ -202,7 +228,10 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
+        file_menu.addAction(self.open_action)
         file_menu.addAction(self.save_action)
+        file_menu.addSeparator()
+        file_menu.addActions([self.csv_action, self.chart_action, self.snapshot_action])
         file_menu.addSeparator()
         file_menu.addAction(self.quit_action)  # macOS moves it to the application menu
         view = bar.addMenu("&View")
@@ -210,6 +239,7 @@ class MainWindow(QMainWindow):
         scan = bar.addMenu("&Scan")
         scan.addAction(self.scan_action)
         scan.addAction(self.auto_refresh)
+        scan.addAction(self.live_action)
         help_menu = bar.addMenu("&Help")
         help_menu.addAction(self.about_action)
 
@@ -238,6 +268,10 @@ class MainWindow(QMainWindow):
         self.interval.valueChanged.connect(lambda seconds: self._scan_timer.setInterval(seconds * 1000))
         toolbar.addWidget(label("every", "secondary"))
         toolbar.addWidget(self.interval)
+        toolbar.addAction(self.live_action)  # shown while a saved scan is open
+        live = toolbar.widgetForAction(self.live_action)
+        if live:
+            live.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def _build_body(self) -> None:
         page = QWidget()
@@ -285,6 +319,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.setHandleWidth(12)
         root.addWidget(self.main_splitter, stretch=1)
 
+        self.page = page
         self.setCentralWidget(ScrollPage(page))
         self.table.setFocus()
 
@@ -414,6 +449,8 @@ class MainWindow(QMainWindow):
     # --- Scanning ---------------------------------------------------------------------
 
     def scan_now(self) -> None:
+        if self._viewing is not None:
+            self._leave_saved_scan()
         if self._scanning:
             return
         self._scanning = True
@@ -429,7 +466,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_auto_refresh(self, enabled: bool) -> None:
         self.interval.setEnabled(enabled)
-        if enabled:
+        if enabled and self._viewing is None:
             self._scan_timer.start()
         else:
             self._scan_timer.stop()
@@ -441,27 +478,56 @@ class MainWindow(QMainWindow):
 
     def _scan_failed(self, error: ScanError) -> None:
         self._finish_scan()
+        if self._viewing is not None:
+            return  # the saved scan stays on show, and the next live scan reports the problem again
         message = str(error).rstrip(".")
         if isinstance(error, AccessDeniedError):
             self.banner.show_access_denied(str(error))
             self.banner.show()
             message = "The system is withholding scan results"
-        suffix = ". Showing the previous results." if self._result is not None else "."
+        suffix = ". Showing the previous results." if self._live is not None else "."
         self.status.setText(f"⚠ {message}{suffix}")
 
     def _poll_failed(self, error: ScanError) -> None:
         self._polling = False
-        if isinstance(error, AccessDeniedError):
+        if isinstance(error, AccessDeniedError) and self._viewing is None:
             self.banner.show_access_denied(str(error))
             self.banner.show()
 
     def apply_result(self, result: ScanResult) -> None:
+        """Take in a live scan. While a saved scan is open, it waits until Back to Live."""
         self._finish_scan()
+        self._live = result
+        if self._viewing is None:
+            self._show_live()
+        if result.connection:
+            self.apply_connection(result.connection, polled=False)
+
+    def apply_connection(self, connection: Connection | None, *, polled: bool = True) -> None:
+        if polled:
+            self._polling = False
+        # The history keeps recording while a saved scan is open, so it has no gap afterwards.
+        self._connection = connection
+        self._history.append((time.time(), connection.rssi if connection else None))
+        if self._viewing is None:
+            self.connection_card.set_connection(connection)
+            self.history_chart.set_samples(self._history)
+
+    def _show_live(self) -> None:
+        result = self._live
+        if result is None:
+            self._clear()
+            return
+        self._show(result)
+        self.banner.setVisible(result.redacted)
+        self.status.setText(f"Last scan {result.timestamp:%H:%M:%S} · {self._summary(result)}")
+
+    def _show(self, result: ScanResult) -> None:
         self._result = result
-        self.save_action.setEnabled(True)
+        for action in self.export_actions:
+            action.setEnabled(True)
         if self._band is None:
             self._band = result.connection.band if result.connection else Band.GHZ_2_4
-        self.banner.setVisible(result.redacted)
         for band, button in self.band_buttons.items():
             count = sum(n.band is band for n in result.networks)
             button.setText(f"{band.label}  ·  {count}")
@@ -469,19 +535,49 @@ class MainWindow(QMainWindow):
         self.band_actions[self._band].setChecked(True)
         self._refresh_band()
 
+    def _clear(self) -> None:
+        """Back to how the window starts, before its first scan."""
+        self._result = None
+        for action in self.export_actions:
+            action.setEnabled(False)
+        for band, button in self.band_buttons.items():
+            button.setText(band.label)
+        self.banner.hide()
+        self.table_model.set_entries([])
+        self.spectrum.set_data(self._band or Band.GHZ_2_4, [], chart_ceiling([]))
+        self.recommendations.set_report(None)
+        self.status.setText("")
+
+    @staticmethod
+    def _summary(result: ScanResult) -> str:
         parts = [f"{len(result.networks)} networks", f"interface {printable(result.interface)}"]
         if result.country:
-            parts.append(f"country {result.country}")
-        self.status.setText(f"Last scan {result.timestamp:%H:%M:%S} · " + " · ".join(parts))
-        if result.connection:
-            self.apply_connection(result.connection, polled=False)
+            parts.append(f"country {printable(result.country)}")
+        return " · ".join(parts)
 
-    def apply_connection(self, connection: Connection | None, *, polled: bool = True) -> None:
-        if polled:
-            self._polling = False
-        self._history.append((time.time(), connection.rssi if connection else None))
-        self.connection_card.set_connection(connection)
+    # --- Saved scans ------------------------------------------------------------------
+
+    def show_saved_scan(self, result: ScanResult, name: str) -> None:
+        """Show a scan from a file until Back to Live or Scan Now. Automatic scans pause meanwhile."""
+        self._viewing = name
+        self._scan_timer.stop()
+        self.live_action.setVisible(True)
+        self.setWindowTitle(f"{printable(name)} – {APP_NAME}")
+        self.banner.hide()  # it's about what this computer may scan, not what's in the file
+        self._show(result)
+        self.connection_card.set_connection(result.connection)
+        self.history_chart.show_message("Saved scans don't include the signal history")
+        self.status.setText(f"Saved scan from {result.timestamp:%Y-%m-%d %H:%M:%S} · {self._summary(result)}")
+
+    def _leave_saved_scan(self) -> None:
+        self._viewing = None
+        self.live_action.setVisible(False)
+        self.setWindowTitle(APP_NAME)
+        self.connection_card.set_connection(self._connection)
         self.history_chart.set_samples(self._history)
+        self._show_live()
+        if self.auto_refresh.isChecked():
+            self._scan_timer.start()
 
     # --- Band view --------------------------------------------------------------------
 
@@ -536,28 +632,92 @@ class MainWindow(QMainWindow):
         self._selected_bssid = entry.network.bssid if entry else None
         self.spectrum.set_selected(entry.index if entry else None)
 
-    # --- Saving and About -------------------------------------------------------------
+    # --- Files and About --------------------------------------------------------------
+
+    def _folder(self) -> Path:
+        """Where file dialogs start: the last folder used, or the home folder.
+
+        Not Documents or Desktop: iCloud and OneDrive often sync those, and a scan, even a picture of
+        one, shows where it was taken.
+        """
+        folder = self._settings.value("export/folder") or QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.HomeLocation
+        )
+        return Path(str(folder))
+
+    def _choose(self, caption: str, name: str, filters: str) -> tuple[Path, str] | None:
+        """Ask where to save. Returns the path and the chosen filter, or None if cancelled."""
+        path, chosen = QFileDialog.getSaveFileName(self, caption, str(self._folder() / name), filters)
+        return (Path(path), chosen) if path else None
+
+    def _write(self, caption: str, path: Path, render: Callable[[], bytes]) -> None:
+        try:
+            path.write_bytes(render())
+        except OSError as e:
+            QMessageBox.warning(self, caption, f"Couldn't save {path.name}: {e.strerror or e}")
+            return
+        self._settings.setValue("export/folder", str(path.parent))
+        self.statusBar().showMessage(f"Saved {path.name}", 5000)
 
     def _save_scan(self) -> None:
         result = self._result
         if result is None:
             return
-        # Not Documents or Desktop: iCloud and OneDrive often sync those, and a scan shows where it was taken.
-        folder = self._settings.value("export/folder") or QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.HomeLocation
-        )
-        suggested = Path(str(folder)) / f"wifi-scan-{result.timestamp:%Y%m%d-%H%M%S}.json"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Scan", str(suggested), "JSON (*.json)")
+        chosen = self._choose("Save Scan", _file_name(result, "scan", ".json"), "JSON (*.json)")
+        if chosen:
+            reports = [recommend(result, band) for band in bands_in(result)]
+            self._write("Save Scan", chosen[0], (to_json(result, reports) + "\n").encode)
+
+    def _open_scan(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open Scan", str(self._folder()), "JSON (*.json)")
         if not path:
             return
-        reports = [recommend(result, band) for band in bands_in(result)]
+        file = Path(path)
         try:
-            Path(path).write_text(to_json(result, reports) + "\n", encoding="utf-8")
+            result = from_json(file.read_bytes())
         except OSError as e:
-            QMessageBox.warning(self, "Save Scan", f"Couldn't save the scan: {e.strerror}")
+            QMessageBox.warning(self, "Open Scan", f"Couldn't open {file.name}: {e.strerror or e}")
             return
-        self._settings.setValue("export/folder", str(Path(path).parent))
-        self.statusBar().showMessage(f"Saved {Path(path).name}", 5000)
+        except ScanFileError as e:
+            QMessageBox.warning(self, "Open Scan", f"{file.name} isn't a scan saved by {APP_NAME}: {e}.")
+            return
+        self._settings.setValue("export/folder", str(file.parent))
+        self.show_saved_scan(result, file.name)
+
+    def _export_csv(self) -> None:
+        result = self._result
+        if result is None:
+            return
+        chosen = self._choose("Export Networks", _file_name(result, "networks", ".csv"), "CSV (*.csv)")
+        if chosen:
+            # With a byte order mark, Excel reads the file as UTF-8 rather than in the system's code page.
+            self._write("Export Networks", chosen[0], lambda: to_csv(result).encode("utf-8-sig"))
+
+    def _export_chart(self) -> None:
+        result, band = self._result, self._band
+        if result is None or band is None:
+            return
+        name = _file_name(result, f"spectrum-{band.value}ghz", ".png")
+        chosen = self._choose("Export Spectrum Chart", name, "PNG image (*.png);;SVG drawing (*.svg)")
+        if not chosen:
+            return
+        path, chosen_filter = chosen
+        if path.suffix.lower() not in (".png", ".svg"):
+            path = path.with_name(path.name + (".svg" if "svg" in chosen_filter else ".png"))
+        if path.suffix.lower() == ".svg":
+            title = f"{band.label} spectrum, {result.timestamp:%Y-%m-%d %H:%M:%S}"
+            self._write("Export Spectrum Chart", path, lambda: snapshot.chart_svg(self.spectrum, title))
+        else:
+            self._write("Export Spectrum Chart", path, lambda: snapshot.chart_png(self.spectrum))
+
+    def _export_snapshot(self) -> None:
+        result = self._result
+        if result is None:
+            return
+        chosen = self._choose("Export Window Snapshot", _file_name(result, "snapshot", ".png"), "PNG image (*.png)")
+        if chosen:
+            # The page, not the window: no toolbar or status bar, and all of it even when it's scrolled.
+            self._write("Export Window Snapshot", chosen[0], lambda: snapshot.widget_png(self.page))
 
     def _show_about(self) -> None:
         QMessageBox.about(

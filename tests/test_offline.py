@@ -83,7 +83,8 @@ def test_nothing_opens_web_links():
 
 
 def test_the_running_app_never_reaches_the_network(tmp_path):
-    # The tests above read the code. This one watches the app scan, draw every band and save the scan.
+    # The tests above read the code. This one watches the app scan, draw every band, save and export
+    # the scan in every format and open it again.
     run = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("audited_run.py")), str(tmp_path)],
         capture_output=True,
@@ -93,4 +94,4 @@ def test_the_running_app_never_reaches_the_network(tmp_path):
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
     )
     assert run.returncode == 0, run.stderr
-    assert json.loads(run.stdout) == {"scanned": True, "saved": True, "attempts": []}
+    assert json.loads(run.stdout) == {"scanned": True, "saved": True, "opened": True, "attempts": []}
